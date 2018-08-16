@@ -16,13 +16,13 @@
 
 PREFIX = staging-k8s.gcr.io
 IMAGE = elasticsearch
-TAG = v5.6.4
+TAG = v6.2.5
 
 build:
 	docker build --pull -t $(PREFIX)/$(IMAGE):$(TAG) .
 
 push:
-	gcloud docker -- push $(PREFIX)/$(IMAGE):$(TAG)
+	docker push $(PREFIX)/$(IMAGE):$(TAG)
 
 binary:
 	CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-w" elasticsearch_logging_discovery.go

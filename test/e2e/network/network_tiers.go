@@ -26,7 +26,6 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	gcecloud "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud"
@@ -40,14 +39,12 @@ var _ = SIGDescribe("Services [Feature:GCEAlphaFeature][Slow]", func() {
 	f := framework.NewDefaultFramework("services")
 
 	var cs clientset.Interface
-	var internalClientset internalclientset.Interface
 	serviceLBNames := []string{}
 
 	BeforeEach(func() {
 		// This test suite requires the GCE environment.
 		framework.SkipUnlessProviderIs("gce")
 		cs = f.ClientSet
-		internalClientset = f.InternalClientset
 	})
 
 	AfterEach(func() {
@@ -56,7 +53,7 @@ var _ = SIGDescribe("Services [Feature:GCEAlphaFeature][Slow]", func() {
 		}
 		for _, lb := range serviceLBNames {
 			framework.Logf("cleaning gce resource for %s", lb)
-			framework.CleanupServiceGCEResources(cs, lb, framework.TestContext.CloudConfig.Zone)
+			framework.CleanupServiceGCEResources(cs, lb, framework.TestContext.CloudConfig.Region, framework.TestContext.CloudConfig.Zone)
 		}
 		//reset serviceLBNames
 		serviceLBNames = []string{}
@@ -76,14 +73,14 @@ var _ = SIGDescribe("Services [Feature:GCEAlphaFeature][Slow]", func() {
 		By("creating a Service of type LoadBalancer using the standard network tier")
 		svc := jig.CreateTCPServiceOrFail(ns, func(svc *v1.Service) {
 			svc.Spec.Type = v1.ServiceTypeLoadBalancer
-			setNetworkTier(svc, gcecloud.NetworkTierAnnotationStandard.ToGCEValue())
+			setNetworkTier(svc, string(gcecloud.NetworkTierAnnotationStandard))
 		})
 		// Verify that service has been updated properly.
 		svcTier, err := gcecloud.GetServiceNetworkTier(svc)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(svcTier).To(Equal(cloud.NetworkTierStandard))
 		// Record the LB name for test cleanup.
-		serviceLBNames = append(serviceLBNames, cloudprovider.GetLoadBalancerName(svc))
+		serviceLBNames = append(serviceLBNames, cloudprovider.DefaultLoadBalancerName(svc))
 
 		// Wait and verify the LB.
 		ingressIP := waitAndVerifyLBWithTier(jig, ns, svcName, "", createTimeout, lagTimeout)
@@ -123,7 +120,7 @@ var _ = SIGDescribe("Services [Feature:GCEAlphaFeature][Slow]", func() {
 		By("updating the Service to use the standard tier with a requested IP")
 		svc = jig.UpdateServiceOrFail(ns, svc.Name, func(svc *v1.Service) {
 			svc.Spec.LoadBalancerIP = requestedIP
-			setNetworkTier(svc, gcecloud.NetworkTierAnnotationStandard.ToGCEValue())
+			setNetworkTier(svc, string(gcecloud.NetworkTierAnnotationStandard))
 		})
 		// Verify that service has been updated properly.
 		Expect(svc.Spec.LoadBalancerIP).To(Equal(requestedIP))

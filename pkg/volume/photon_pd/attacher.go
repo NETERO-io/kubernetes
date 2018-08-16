@@ -32,7 +32,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 type photonPersistentDiskAttacher struct {
@@ -41,7 +40,12 @@ type photonPersistentDiskAttacher struct {
 }
 
 var _ volume.Attacher = &photonPersistentDiskAttacher{}
+
+var _ volume.DeviceMounter = &photonPersistentDiskAttacher{}
+
 var _ volume.AttachableVolumePlugin = &photonPersistentDiskPlugin{}
+
+var _ volume.DeviceMountableVolumePlugin = &photonPersistentDiskPlugin{}
 
 func (plugin *photonPersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	photonCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
@@ -54,6 +58,10 @@ func (plugin *photonPersistentDiskPlugin) NewAttacher() (volume.Attacher, error)
 		host:        plugin.host,
 		photonDisks: photonCloud,
 	}, nil
+}
+
+func (plugin *photonPersistentDiskPlugin) NewDeviceMounter() (volume.DeviceMounter, error) {
+	return plugin.NewAttacher()
 }
 
 // Attaches the volume specified by the given spec to the given host.
@@ -183,7 +191,7 @@ func (attacher *photonPersistentDiskAttacher) GetDeviceMountPath(spec *volume.Sp
 // by deviceMountPath; returns a list of paths.
 func (plugin *photonPersistentDiskPlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {
 	mounter := plugin.host.GetMounter(plugin.GetPluginName())
-	return mount.GetMountRefs(mounter, deviceMountPath)
+	return mounter.GetMountRefs(deviceMountPath)
 }
 
 // MountDevice mounts device to global mount point.
@@ -211,8 +219,8 @@ func (attacher *photonPersistentDiskAttacher) MountDevice(spec *volume.Spec, dev
 	options := []string{}
 
 	if notMnt {
-		diskMounter := volumehelper.NewSafeFormatAndMountFromHost(photonPersistentDiskPluginName, attacher.host)
-		mountOptions := volume.MountOptionFromSpec(spec)
+		diskMounter := volumeutil.NewSafeFormatAndMountFromHost(photonPersistentDiskPluginName, attacher.host)
+		mountOptions := volumeutil.MountOptionFromSpec(spec)
 		err = diskMounter.FormatAndMount(devicePath, deviceMountPath, volumeSource.FSType, mountOptions)
 		if err != nil {
 			os.Remove(deviceMountPath)
@@ -230,6 +238,8 @@ type photonPersistentDiskDetacher struct {
 
 var _ volume.Detacher = &photonPersistentDiskDetacher{}
 
+var _ volume.DeviceUnmounter = &photonPersistentDiskDetacher{}
+
 func (plugin *photonPersistentDiskPlugin) NewDetacher() (volume.Detacher, error) {
 	photonCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
 	if err != nil {
@@ -241,6 +251,10 @@ func (plugin *photonPersistentDiskPlugin) NewDetacher() (volume.Detacher, error)
 		mounter:     plugin.host.GetMounter(plugin.GetPluginName()),
 		photonDisks: photonCloud,
 	}, nil
+}
+
+func (plugin *photonPersistentDiskPlugin) NewDeviceUnmounter() (volume.DeviceUnmounter, error) {
+	return plugin.NewDetacher()
 }
 
 // Detach the given device from the given host.

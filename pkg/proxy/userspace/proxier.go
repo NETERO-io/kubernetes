@@ -36,7 +36,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
+	utilproxy "k8s.io/kubernetes/pkg/proxy/util"
 	"k8s.io/kubernetes/pkg/util/conntrack"
 	"k8s.io/kubernetes/pkg/util/iptables"
 	utilexec "k8s.io/utils/exec"
@@ -155,18 +155,15 @@ func IsProxyLocked(err error) bool {
 // if iptables fails to update or acquire the initial lock. Once a proxier is
 // created, it will keep iptables up to date in the background and will not
 // terminate if a particular iptables call fails.
-func NewProxier(loadBalancer LoadBalancer, listenIP net.IP, iptables iptables.Interface, exec utilexec.Interface, pr utilnet.PortRange, syncPeriod, minSyncPeriod, udpIdleTimeout time.Duration) (*Proxier, error) {
-	return NewCustomProxier(loadBalancer, listenIP, iptables, exec, pr, syncPeriod, minSyncPeriod, udpIdleTimeout, newProxySocket)
+func NewProxier(loadBalancer LoadBalancer, listenIP net.IP, iptables iptables.Interface, exec utilexec.Interface, pr utilnet.PortRange, syncPeriod, minSyncPeriod, udpIdleTimeout time.Duration, nodePortAddresses []string) (*Proxier, error) {
+	return NewCustomProxier(loadBalancer, listenIP, iptables, exec, pr, syncPeriod, minSyncPeriod, udpIdleTimeout, nodePortAddresses, newProxySocket)
 }
 
 // NewCustomProxier functions similarly to NewProxier, returning a new Proxier
 // for the given LoadBalancer and address.  The new proxier is constructed using
 // the ProxySocket constructor provided, however, instead of constructing the
 // default ProxySockets.
-func NewCustomProxier(loadBalancer LoadBalancer, listenIP net.IP, iptables iptables.Interface, exec utilexec.Interface, pr utilnet.PortRange, syncPeriod, minSyncPeriod, udpIdleTimeout time.Duration, makeProxySocket ProxySocketFunc) (*Proxier, error) {
-	if listenIP == nil {
-		return nil, fmt.Errorf("invalid listen ip for kube-proxy")
-	}
+func NewCustomProxier(loadBalancer LoadBalancer, listenIP net.IP, iptables iptables.Interface, exec utilexec.Interface, pr utilnet.PortRange, syncPeriod, minSyncPeriod, udpIdleTimeout time.Duration, nodePortAddresses []string, makeProxySocket ProxySocketFunc) (*Proxier, error) {
 	if listenIP.Equal(localhostIPv4) || listenIP.Equal(localhostIPv6) {
 		return nil, ErrProxyOnLocalhost
 	}
@@ -450,7 +447,7 @@ func (proxier *Proxier) mergeService(service *api.Service) sets.String {
 		info.portal.port = int(servicePort.Port)
 		info.externalIPs = service.Spec.ExternalIPs
 		// Deep-copy in case the service instance changes
-		info.loadBalancerStatus = *helper.LoadBalancerStatusDeepCopy(&service.Status.LoadBalancer)
+		info.loadBalancerStatus = *service.Status.LoadBalancer.DeepCopy()
 		info.nodePort = int(servicePort.NodePort)
 		info.sessionAffinityType = service.Spec.SessionAffinity
 		// Kube-apiserver side guarantees SessionAffinityConfig won't be nil when session affinity type is ClientIP
@@ -591,7 +588,7 @@ func (proxier *Proxier) openPortal(service proxy.ServicePortName, info *ServiceI
 }
 
 func (proxier *Proxier) openOnePortal(portal portal, protocol api.Protocol, proxyIP net.IP, proxyPort int, name proxy.ServicePortName) error {
-	if local, err := proxyutil.IsLocalIP(portal.ip.String()); err != nil {
+	if local, err := utilproxy.IsLocalIP(portal.ip.String()); err != nil {
 		return fmt.Errorf("can't determine if IP %s is local, assuming not: %v", portal.ip, err)
 	} else if local {
 		err := proxier.claimNodePort(portal.ip, portal.port, protocol, name)
@@ -711,7 +708,7 @@ func (proxier *Proxier) openNodePort(nodePort int, protocol api.Protocol, proxyI
 	}
 
 	// Handle traffic from containers.
-	args := proxier.iptablesContainerNodePortArgs(nodePort, protocol, proxyIP, proxyPort, name)
+	args := proxier.iptablesContainerPortalArgs(nil, false, false, nodePort, protocol, proxyIP, proxyPort, name)
 	existed, err := proxier.iptables.EnsureRule(iptables.Append, iptables.TableNAT, iptablesContainerNodePortChain, args...)
 	if err != nil {
 		glog.Errorf("Failed to install iptables %s rule for service %q", iptablesContainerNodePortChain, name)
@@ -770,7 +767,7 @@ func (proxier *Proxier) closePortal(service proxy.ServicePortName, info *Service
 func (proxier *Proxier) closeOnePortal(portal portal, protocol api.Protocol, proxyIP net.IP, proxyPort int, name proxy.ServicePortName) []error {
 	el := []error{}
 
-	if local, err := proxyutil.IsLocalIP(portal.ip.String()); err != nil {
+	if local, err := utilproxy.IsLocalIP(portal.ip.String()); err != nil {
 		el = append(el, fmt.Errorf("can't determine if IP %s is local, assuming not: %v", portal.ip, err))
 	} else if local {
 		if err := proxier.releaseNodePort(portal.ip, portal.port, protocol, name); err != nil {
@@ -814,7 +811,7 @@ func (proxier *Proxier) closeNodePort(nodePort int, protocol api.Protocol, proxy
 	el := []error{}
 
 	// Handle traffic from containers.
-	args := proxier.iptablesContainerNodePortArgs(nodePort, protocol, proxyIP, proxyPort, name)
+	args := proxier.iptablesContainerPortalArgs(nil, false, false, nodePort, protocol, proxyIP, proxyPort, name)
 	if err := proxier.iptables.DeleteRule(iptables.TableNAT, iptablesContainerNodePortChain, args...); err != nil {
 		glog.Errorf("Failed to delete iptables %s rule for service %q", iptablesContainerNodePortChain, name)
 		el = append(el, err)
@@ -970,7 +967,7 @@ func iptablesCommonPortalArgs(destIP net.IP, addPhysicalInterfaceMatch bool, add
 	}
 
 	if destIP != nil {
-		args = append(args, "-d", proxyutil.ToCIDR(destIP))
+		args = append(args, "-d", utilproxy.ToCIDR(destIP))
 	}
 
 	if addPhysicalInterfaceMatch {
@@ -1064,23 +1061,6 @@ func (proxier *Proxier) iptablesHostPortalArgs(destIP net.IP, addDstLocalMatch b
 	return args
 }
 
-// Build a slice of iptables args for a from-container public-port rule.
-// See iptablesContainerPortalArgs
-// TODO: Should we just reuse iptablesContainerPortalArgs?
-func (proxier *Proxier) iptablesContainerNodePortArgs(nodePort int, protocol api.Protocol, proxyIP net.IP, proxyPort int, service proxy.ServicePortName) []string {
-	args := iptablesCommonPortalArgs(nil, false, false, nodePort, protocol, service)
-
-	if proxyIP.Equal(zeroIPv4) || proxyIP.Equal(zeroIPv6) {
-		// TODO: Can we REDIRECT with IPv6?
-		args = append(args, "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", proxyPort))
-	} else {
-		// TODO: Can we DNAT with IPv6?
-		args = append(args, "-j", "DNAT", "--to-destination", net.JoinHostPort(proxyIP.String(), strconv.Itoa(proxyPort)))
-	}
-
-	return args
-}
-
 // Build a slice of iptables args for a from-host public-port rule.
 // See iptablesHostPortalArgs
 // TODO: Should we just reuse iptablesHostPortalArgs?
@@ -1098,7 +1078,7 @@ func (proxier *Proxier) iptablesHostNodePortArgs(nodePort int, protocol api.Prot
 // Build a slice of iptables args for an from-non-local public-port rule.
 func (proxier *Proxier) iptablesNonLocalNodePortArgs(nodePort int, protocol api.Protocol, proxyIP net.IP, proxyPort int, service proxy.ServicePortName) []string {
 	args := iptablesCommonPortalArgs(nil, false, false, proxyPort, protocol, service)
-	args = append(args, "-m", "comment", "--comment", service.String(), "-m", "state", "--state", "NEW", "-j", "ACCEPT")
+	args = append(args, "-m", "state", "--state", "NEW", "-j", "ACCEPT")
 	return args
 }
 

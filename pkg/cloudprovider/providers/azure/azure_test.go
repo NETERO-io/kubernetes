@@ -17,10 +17,12 @@ limitations under the License.
 package azure
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -30,16 +32,92 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	serviceapi "k8s.io/kubernetes/pkg/api/v1/service"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure/auth"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 
-	"github.com/Azure/azure-sdk-for-go/arm/compute"
-	"github.com/Azure/azure-sdk-for-go/arm/network"
+	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-04-01/compute"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2017-09-01/network"
 	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/stretchr/testify/assert"
 )
 
 var testClusterName = "testCluster"
+
+func TestParseConfig(t *testing.T) {
+	azureConfig := `{
+		"aadClientCertPassword": "aadClientCertPassword",
+		"aadClientCertPath": "aadClientCertPath",
+		"aadClientId": "aadClientId",
+		"aadClientSecret": "aadClientSecret",
+		"cloud":"AzurePublicCloud",
+		"cloudProviderBackoff": true,
+		"cloudProviderBackoffDuration": 1,
+		"cloudProviderBackoffExponent": 1,
+		"cloudProviderBackoffJitter": 1,
+		"cloudProviderBackoffRetries": 1,
+		"cloudProviderRatelimit": true,
+		"cloudProviderRateLimitBucket": 1,
+		"CloudProviderRateLimitBucketWrite": 1,
+		"cloudProviderRateLimitQPS": 1,
+		"CloudProviderRateLimitQPSWrite": 1,
+		"location": "location",
+		"maximumLoadBalancerRuleCount": 1,
+		"primaryAvailabilitySetName": "primaryAvailabilitySetName",
+		"primaryScaleSetName": "primaryScaleSetName",
+		"resourceGroup": "resourceGroup",
+		"routeTableName": "routeTableName",
+		"securityGroupName": "securityGroupName",
+		"subnetName": "subnetName",
+		"subscriptionId": "subscriptionId",
+		"tenantId": "tenantId",
+		"useInstanceMetadata": true,
+		"useManagedIdentityExtension": true,
+		"vnetName": "vnetName",
+		"vnetResourceGroup": "vnetResourceGroup",
+		vmType: "standard"
+	}`
+	expected := &Config{
+		AzureAuthConfig: auth.AzureAuthConfig{
+			AADClientCertPassword:       "aadClientCertPassword",
+			AADClientCertPath:           "aadClientCertPath",
+			AADClientID:                 "aadClientId",
+			AADClientSecret:             "aadClientSecret",
+			Cloud:                       "AzurePublicCloud",
+			SubscriptionID:              "subscriptionId",
+			TenantID:                    "tenantId",
+			UseManagedIdentityExtension: true,
+		},
+		CloudProviderBackoff:              true,
+		CloudProviderBackoffDuration:      1,
+		CloudProviderBackoffExponent:      1,
+		CloudProviderBackoffJitter:        1,
+		CloudProviderBackoffRetries:       1,
+		CloudProviderRateLimit:            true,
+		CloudProviderRateLimitBucket:      1,
+		CloudProviderRateLimitBucketWrite: 1,
+		CloudProviderRateLimitQPS:         1,
+		CloudProviderRateLimitQPSWrite:    1,
+		Location:                          "location",
+		MaximumLoadBalancerRuleCount:      1,
+		PrimaryAvailabilitySetName:        "primaryAvailabilitySetName",
+		PrimaryScaleSetName:               "primaryScaleSetName",
+		ResourceGroup:                     "resourceGroup",
+		RouteTableName:                    "routeTableName",
+		SecurityGroupName:                 "securityGroupName",
+		SubnetName:                        "subnetName",
+		UseInstanceMetadata:               true,
+		VMType:                            "standard",
+		VnetName:                          "vnetName",
+		VnetResourceGroup:                 "vnetResourceGroup",
+	}
+
+	buffer := bytes.NewBufferString(azureConfig)
+	config, err := parseConfig(buffer)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, config)
+}
 
 // Test flipServiceInternalAnnotation
 func TestFlipServiceInternalAnnotation(t *testing.T) {
@@ -139,9 +217,11 @@ func testLoadBalancerServiceDefaultModeSelection(t *testing.T, isInternal bool) 
 			expectedLBName = testClusterName + "-internal"
 		}
 
-		result, _ := az.LoadBalancerClient.List(az.Config.ResourceGroup)
-		lb := (*result.Value)[0]
-		lbCount := len(*result.Value)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		result, _ := az.LoadBalancerClient.List(ctx, az.Config.ResourceGroup)
+		lb := result[0]
+		lbCount := len(result)
 		expectedNumOfLB := 1
 		if lbCount != expectedNumOfLB {
 			t.Errorf("Unexpected number of LB's: Expected (%d) Found (%d)", expectedNumOfLB, lbCount)
@@ -189,15 +269,17 @@ func testLoadBalancerServiceAutoModeSelection(t *testing.T, isInternal bool) {
 
 		// expected is MIN(index, availabilitySetCount)
 		expectedNumOfLB := int(math.Min(float64(index), float64(availabilitySetCount)))
-		result, _ := az.LoadBalancerClient.List(az.Config.ResourceGroup)
-		lbCount := len(*result.Value)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		result, _ := az.LoadBalancerClient.List(ctx, az.Config.ResourceGroup)
+		lbCount := len(result)
 		if lbCount != expectedNumOfLB {
 			t.Errorf("Unexpected number of LB's: Expected (%d) Found (%d)", expectedNumOfLB, lbCount)
 		}
 
 		maxRules := 0
 		minRules := serviceCount
-		for _, lb := range *result.Value {
+		for _, lb := range result {
 			ruleCount := len(*lb.LoadBalancingRules)
 			if ruleCount < minRules {
 				minRules = ruleCount
@@ -252,8 +334,10 @@ func testLoadBalancerServicesSpecifiedSelection(t *testing.T, isInternal bool) {
 
 		// expected is MIN(index, 2)
 		expectedNumOfLB := int(math.Min(float64(index), float64(2)))
-		result, _ := az.LoadBalancerClient.List(az.Config.ResourceGroup)
-		lbCount := len(*result.Value)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		result, _ := az.LoadBalancerClient.List(ctx, az.Config.ResourceGroup)
+		lbCount := len(result)
 		if lbCount != expectedNumOfLB {
 			t.Errorf("Unexpected number of LB's: Expected (%d) Found (%d)", expectedNumOfLB, lbCount)
 		}
@@ -290,8 +374,10 @@ func testLoadBalancerMaxRulesServices(t *testing.T, isInternal bool) {
 
 		// expected is MIN(index, az.Config.MaximumLoadBalancerRuleCount)
 		expectedNumOfLBRules := int(math.Min(float64(index), float64(az.Config.MaximumLoadBalancerRuleCount)))
-		result, _ := az.LoadBalancerClient.List(az.Config.ResourceGroup)
-		lbCount := len(*result.Value)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		result, _ := az.LoadBalancerClient.List(ctx, az.Config.ResourceGroup)
+		lbCount := len(result)
 		if lbCount != expectedNumOfLBRules {
 			t.Errorf("Unexpected number of LB's: Expected (%d) Found (%d)", expectedNumOfLBRules, lbCount)
 		}
@@ -360,8 +446,10 @@ func testLoadBalancerServiceAutoModeDeleteSelection(t *testing.T, isInternal boo
 
 		// expected is MIN(index, availabilitySetCount)
 		expectedNumOfLB := int(math.Min(float64(index), float64(availabilitySetCount)))
-		result, _ := az.LoadBalancerClient.List(az.Config.ResourceGroup)
-		lbCount := len(*result.Value)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		result, _ := az.LoadBalancerClient.List(ctx, az.Config.ResourceGroup)
+		lbCount := len(result)
 		if lbCount != expectedNumOfLB {
 			t.Errorf("Unexpected number of LB's: Expected (%d) Found (%d)", expectedNumOfLB, lbCount)
 		}
@@ -864,7 +952,10 @@ func getTestCloud() (az *Cloud) {
 			RouteTableName:               "rt",
 			PrimaryAvailabilitySetName:   "as",
 			MaximumLoadBalancerRuleCount: 250,
+			VMType: vmTypeStandard,
 		},
+		nodeZones:          map[string]sets.String{},
+		nodeInformerSynced: func() bool { return true },
 	}
 	az.DisksClient = newFakeDisksClient()
 	az.InterfacesClient = newFakeAzureInterfacesClient()
@@ -969,7 +1060,9 @@ func getClusterResources(az *Cloud, vmCount int, availabilitySetCount int) (clus
 				},
 			},
 		}
-		az.InterfacesClient.CreateOrUpdate(az.Config.ResourceGroup, nicName, newNIC, nil)
+		ctx, cancel := getContextWithCancel()
+		defer cancel()
+		az.InterfacesClient.CreateOrUpdate(ctx, az.Config.ResourceGroup, nicName, newNIC)
 
 		// create vm
 		asID := az.getAvailabilitySetID(asName)
@@ -990,8 +1083,10 @@ func getClusterResources(az *Cloud, vmCount int, availabilitySetCount int) (clus
 			},
 		}
 
-		_, errChan := az.VirtualMachinesClient.CreateOrUpdate(az.Config.ResourceGroup, vmName, newVM, nil)
-		if err := <-errChan; err != nil {
+		vmCtx, vmCancel := getContextWithCancel()
+		defer vmCancel()
+		_, err := az.VirtualMachinesClient.CreateOrUpdate(vmCtx, az.Config.ResourceGroup, vmName, newVM)
+		if err != nil {
 		}
 		// add to kubernetes
 		newNode := &v1.Node{
@@ -1068,7 +1163,7 @@ func getTestSecurityGroup(az *Cloud, services ...v1.Service) *network.SecurityGr
 		for _, port := range service.Spec.Ports {
 			sources := getServiceSourceRanges(&service)
 			for _, src := range sources {
-				ruleName := getSecurityRuleName(&service, port, src)
+				ruleName := az.getSecurityRuleName(&service, port, src)
 				rules = append(rules, network.SecurityRule{
 					Name: to.StringPtr(ruleName),
 					SecurityRulePropertiesFormat: &network.SecurityRulePropertiesFormat{
@@ -1087,16 +1182,19 @@ func getTestSecurityGroup(az *Cloud, services ...v1.Service) *network.SecurityGr
 		},
 	}
 
+	ctx, cancel := getContextWithCancel()
+	defer cancel()
 	az.SecurityGroupsClient.CreateOrUpdate(
+		ctx,
 		az.ResourceGroup,
 		az.SecurityGroupName,
-		sg,
-		nil)
+		sg)
 
 	return &sg
 }
 
 func validateLoadBalancer(t *testing.T, loadBalancer *network.LoadBalancer, services ...v1.Service) {
+	az := getTestCloud()
 	expectedRuleCount := 0
 	expectedFrontendIPCount := 0
 	expectedProbeCount := 0
@@ -1105,14 +1203,14 @@ func validateLoadBalancer(t *testing.T, loadBalancer *network.LoadBalancer, serv
 		if len(svc.Spec.Ports) > 0 {
 			expectedFrontendIPCount++
 			expectedFrontendIP := ExpectedFrontendIPInfo{
-				Name:   getFrontendIPConfigName(&svc, subnet(&svc)),
+				Name:   az.getFrontendIPConfigName(&svc, subnet(&svc)),
 				Subnet: subnet(&svc),
 			}
 			expectedFrontendIPs = append(expectedFrontendIPs, expectedFrontendIP)
 		}
 		for _, wantedRule := range svc.Spec.Ports {
 			expectedRuleCount++
-			wantedRuleName := getLoadBalancerRuleName(&svc, wantedRule, subnet(&svc))
+			wantedRuleName := az.getLoadBalancerRuleName(&svc, wantedRule, subnet(&svc))
 			foundRule := false
 			for _, actualRule := range *loadBalancer.LoadBalancingRules {
 				if strings.EqualFold(*actualRule.Name, wantedRuleName) &&
@@ -1237,12 +1335,12 @@ func validatePublicIP(t *testing.T, publicIP *network.PublicIPAddress, service *
 		t.Errorf("Expected publicIP resource exists, when it is not an internal service")
 	}
 
-	if publicIP.Tags == nil || (*publicIP.Tags)["service"] == nil {
+	if publicIP.Tags == nil || publicIP.Tags["service"] == nil {
 		t.Errorf("Expected publicIP resource has tags[service]")
 	}
 
 	serviceName := getServiceName(service)
-	if serviceName != *(*publicIP.Tags)["service"] {
+	if serviceName != *(publicIP.Tags["service"]) {
 		t.Errorf("Expected publicIP resource has matching tags[service]")
 	}
 	// We cannot use service.Spec.LoadBalancerIP to compare with
@@ -1303,12 +1401,13 @@ func securityRuleMatches(serviceSourceRange string, servicePort v1.ServicePort, 
 }
 
 func validateSecurityGroup(t *testing.T, securityGroup *network.SecurityGroup, services ...v1.Service) {
+	az := getTestCloud()
 	seenRules := make(map[string]string)
 	for _, svc := range services {
 		for _, wantedRule := range svc.Spec.Ports {
 			sources := getServiceSourceRanges(&svc)
 			for _, source := range sources {
-				wantedRuleName := getSecurityRuleName(&svc, wantedRule, source)
+				wantedRuleName := az.getSecurityRuleName(&svc, wantedRule, source)
 				seenRules[wantedRuleName] = wantedRuleName
 				foundRule := false
 				for _, actualRule := range *securityGroup.SecurityRules {
@@ -1574,35 +1673,82 @@ func validateEmptyConfig(t *testing.T, config string) {
 		t.Errorf("got incorrect value for CloudProviderRateLimit")
 	}
 }
+
 func TestGetZone(t *testing.T) {
-	data := `{"ID":"_azdev","UD":"0","FD":"99"}`
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, data)
-	}))
-	defer ts.Close()
-
-	cloud := &Cloud{}
-	cloud.Location = "eastus"
-
-	zone, err := cloud.getZoneFromURL(ts.URL)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
+	cloud := &Cloud{
+		Config: Config{
+			Location: "eastus",
+		},
+		metadata: &InstanceMetadata{},
 	}
-	if zone.FailureDomain != "99" {
-		t.Errorf("Unexpected value: %s, expected '99'", zone.FailureDomain)
+	testcases := []struct {
+		name        string
+		zone        string
+		faultDomain string
+		expected    string
+	}{
+		{
+			name:     "GetZone should get real zone if only node's zone is set",
+			zone:     "1",
+			expected: "eastus-1",
+		},
+		{
+			name:        "GetZone should get real zone if both node's zone and FD are set",
+			zone:        "1",
+			faultDomain: "99",
+			expected:    "eastus-1",
+		},
+		{
+			name:        "GetZone should get faultDomain if node's zone isn't set",
+			faultDomain: "99",
+			expected:    "99",
+		},
 	}
-	if zone.Region != cloud.Location {
-		t.Errorf("Expected: %s, saw: %s", cloud.Location, zone.Region)
+
+	for _, test := range testcases {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Errorf("Test [%s] unexpected error: %v", test.name, err)
+		}
+
+		mux := http.NewServeMux()
+		mux.Handle("/v1/InstanceInfo/FD", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, test.faultDomain)
+		}))
+		mux.Handle("/instance/compute/zone", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, test.zone)
+		}))
+		go func() {
+			http.Serve(listener, mux)
+		}()
+		defer listener.Close()
+
+		cloud.metadata.baseURL = "http://" + listener.Addr().String() + "/"
+		zone, err := cloud.GetZone(context.Background())
+		if err != nil {
+			t.Errorf("Test [%s] unexpected error: %v", test.name, err)
+		}
+		if zone.FailureDomain != test.expected {
+			t.Errorf("Test [%s] unexpected zone: %s, expected %q", test.name, zone.FailureDomain, test.expected)
+		}
+		if zone.Region != cloud.Location {
+			t.Errorf("Test [%s] unexpected region: %s, expected: %s", test.name, zone.Region, cloud.Location)
+		}
 	}
 }
 
 func TestFetchFaultDomain(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"ID":"_azdev","UD":"0","FD":"99"}`)
+		fmt.Fprint(w, "99")
 	}))
 	defer ts.Close()
 
-	faultDomain, err := fetchFaultDomain(ts.URL)
+	cloud := &Cloud{}
+	cloud.metadata = &InstanceMetadata{
+		baseURL: ts.URL + "/",
+	}
+
+	faultDomain, err := cloud.fetchFaultDomain()
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -1611,23 +1757,6 @@ func TestFetchFaultDomain(t *testing.T) {
 	}
 	if *faultDomain != "99" {
 		t.Errorf("Expected '99', saw '%s'", *faultDomain)
-	}
-}
-
-func TestDecodeInstanceInfo(t *testing.T) {
-	response := `{"ID":"_azdev","UD":"0","FD":"99"}`
-
-	faultDomain, err := readFaultDomain(strings.NewReader(response))
-	if err != nil {
-		t.Errorf("Unexpected error in ReadFaultDomain: %v", err)
-	}
-
-	if faultDomain == nil {
-		t.Error("Fault domain was unexpectedly nil")
-	}
-
-	if *faultDomain != "99" {
-		t.Error("got incorrect fault domain")
 	}
 }
 
@@ -1765,13 +1894,15 @@ func addTestSubnet(t *testing.T, az *Cloud, svc *v1.Service) {
 		az.VnetName,
 		subName)
 
-	_, errChan := az.SubnetsClient.CreateOrUpdate(az.VnetResourceGroup, az.VnetName, subName,
+	ctx, cancel := getContextWithCancel()
+	defer cancel()
+	_, err := az.SubnetsClient.CreateOrUpdate(ctx, az.VnetResourceGroup, az.VnetName, subName,
 		network.Subnet{
 			ID:   &subnetID,
 			Name: &subName,
-		}, nil)
+		})
 
-	if err := <-errChan; err != nil {
+	if err != nil {
 		t.Errorf("Subnet cannot be created or update, %v", err)
 	}
 	svc.Annotations[ServiceAnnotationLoadBalancerInternalSubnet] = subName
@@ -2442,8 +2573,8 @@ func TestCanCombineSharedAndPrivateRulesInSameGroup(t *testing.T) {
 
 	expectedRuleName13 := "shared-TCP-4444-Internet"
 	expectedRuleName2 := "shared-TCP-8888-Internet"
-	expectedRuleName4 := getSecurityRuleName(&svc4, v1.ServicePort{Port: 4444, Protocol: v1.ProtocolTCP}, "Internet")
-	expectedRuleName5 := getSecurityRuleName(&svc5, v1.ServicePort{Port: 8888, Protocol: v1.ProtocolTCP}, "Internet")
+	expectedRuleName4 := az.getSecurityRuleName(&svc4, v1.ServicePort{Port: 4444, Protocol: v1.ProtocolTCP}, "Internet")
+	expectedRuleName5 := az.getSecurityRuleName(&svc5, v1.ServicePort{Port: 8888, Protocol: v1.ProtocolTCP}, "Internet")
 
 	sg := getTestSecurityGroup(az)
 
@@ -2604,3 +2735,39 @@ func TestCanCombineSharedAndPrivateRulesInSameGroup(t *testing.T) {
 // func TestIfServiceIsEditedFromSharedRuleToOwnRuleThenItIsRemovedFromSharedRuleAndOwnRuleIsCreated(t *testing.T) {
 // 	t.Error()
 // }
+
+func TestGetResourceGroupFromDiskURI(t *testing.T) {
+	tests := []struct {
+		diskURL        string
+		expectedResult string
+		expectError    bool
+	}{
+		{
+			diskURL:        "/subscriptions/4be8920b-2978-43d7-axyz-04d8549c1d05/resourceGroups/azure-k8s1102/providers/Microsoft.Compute/disks/andy-mghyb1102-dynamic-pvc-f7f014c9-49f4-11e8-ab5c-000d3af7b38e",
+			expectedResult: "azure-k8s1102",
+			expectError:    false,
+		},
+		{
+			diskURL:        "/4be8920b-2978-43d7-axyz-04d8549c1d05/resourceGroups/azure-k8s1102/providers/Microsoft.Compute/disks/andy-mghyb1102-dynamic-pvc-f7f014c9-49f4-11e8-ab5c-000d3af7b38e",
+			expectedResult: "",
+			expectError:    true,
+		},
+		{
+			diskURL:        "",
+			expectedResult: "",
+			expectError:    true,
+		},
+	}
+
+	for _, test := range tests {
+		result, err := getResourceGroupFromDiskURI(test.diskURL)
+		assert.Equal(t, result, test.expectedResult, "Expect result not equal with getResourceGroupFromDiskURI(%s) return: %q, expected: %q",
+			test.diskURL, result, test.expectedResult)
+
+		if test.expectError {
+			assert.NotNil(t, err, "Expect error during getResourceGroupFromDiskURI(%s)", test.diskURL)
+		} else {
+			assert.Nil(t, err, "Expect error is nil during getResourceGroupFromDiskURI(%s)", test.diskURL)
+		}
+	}
+}

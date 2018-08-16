@@ -25,7 +25,7 @@ import (
 	dockercontainer "github.com/docker/docker/api/types/container"
 
 	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
-	knetwork "k8s.io/kubernetes/pkg/kubelet/network"
+	knetwork "k8s.io/kubernetes/pkg/kubelet/dockershim/network"
 )
 
 // applySandboxSecurityContext updates docker sandbox options according to security context.
@@ -39,13 +39,18 @@ func applySandboxSecurityContext(lc *runtimeapi.LinuxPodSandboxConfig, config *d
 		sc = &runtimeapi.LinuxContainerSecurityContext{
 			SupplementalGroups: lc.SecurityContext.SupplementalGroups,
 			RunAsUser:          lc.SecurityContext.RunAsUser,
+			RunAsGroup:         lc.SecurityContext.RunAsGroup,
 			ReadonlyRootfs:     lc.SecurityContext.ReadonlyRootfs,
 			SelinuxOptions:     lc.SecurityContext.SelinuxOptions,
 			NamespaceOptions:   lc.SecurityContext.NamespaceOptions,
 		}
 	}
 
-	modifyContainerConfig(sc, config)
+	err := modifyContainerConfig(sc, config)
+	if err != nil {
+		return err
+	}
+
 	if err := modifyHostConfig(sc, hc, separator); err != nil {
 		return err
 	}
@@ -59,7 +64,10 @@ func applyContainerSecurityContext(lc *runtimeapi.LinuxContainerConfig, podSandb
 		return nil
 	}
 
-	modifyContainerConfig(lc.SecurityContext, config)
+	err := modifyContainerConfig(lc.SecurityContext, config)
+	if err != nil {
+		return err
+	}
 	if err := modifyHostConfig(lc.SecurityContext, hc, separator); err != nil {
 		return err
 	}
@@ -68,9 +76,9 @@ func applyContainerSecurityContext(lc *runtimeapi.LinuxContainerConfig, podSandb
 }
 
 // modifyContainerConfig applies container security context config to dockercontainer.Config.
-func modifyContainerConfig(sc *runtimeapi.LinuxContainerSecurityContext, config *dockercontainer.Config) {
+func modifyContainerConfig(sc *runtimeapi.LinuxContainerSecurityContext, config *dockercontainer.Config) error {
 	if sc == nil {
-		return
+		return nil
 	}
 	if sc.RunAsUser != nil {
 		config.User = strconv.FormatInt(sc.GetRunAsUser().Value, 10)
@@ -78,6 +86,18 @@ func modifyContainerConfig(sc *runtimeapi.LinuxContainerSecurityContext, config 
 	if sc.RunAsUsername != "" {
 		config.User = sc.RunAsUsername
 	}
+
+	user := config.User
+	if sc.RunAsGroup != nil {
+		if user == "" {
+			return fmt.Errorf("runAsGroup is specified without a runAsUser.")
+		}
+		user = fmt.Sprintf("%s:%d", config.User, sc.GetRunAsGroup().Value)
+	}
+
+	config.User = user
+
+	return nil
 }
 
 // modifyHostConfig applies security context config to dockercontainer.HostConfig.
@@ -180,20 +200,13 @@ func modifyHostOptionsForContainer(nsOpts *runtimeapi.NamespaceOption, podSandbo
 	}
 }
 
-// modifyPIDNamespaceOverrides implements two temporary overrides for the default PID namespace sharing for Docker:
+// modifyPIDNamespaceOverrides implements a temporary override for the default PID namespace sharing for Docker:
 //     1. Docker engine prior to API Version 1.24 doesn't support attaching to another container's
 //        PID namespace, and it didn't stabilize until 1.26. This check can be removed when Kubernetes'
 //        minimum Docker version is at least 1.13.1 (API version 1.26).
-//     2. The administrator can override the API behavior by using the deprecated --docker-disable-shared-pid=false
-//        flag. Until this flag is removed, this causes pods to use NamespaceMode_POD instead of
-//        NamespaceMode_CONTAINER regardless of pod configuration.
 // TODO(verb): remove entirely once these two conditions are satisfied
-func modifyContainerPIDNamespaceOverrides(disableSharedPID bool, version *semver.Version, hc *dockercontainer.HostConfig, podSandboxID string) {
-	if version.LT(semver.Version{Major: 1, Minor: 26}) {
-		if strings.HasPrefix(string(hc.PidMode), "container:") {
-			hc.PidMode = ""
-		}
-	} else if !disableSharedPID && hc.PidMode == "" {
-		hc.PidMode = dockercontainer.PidMode(fmt.Sprintf("container:%v", podSandboxID))
+func modifyContainerPIDNamespaceOverrides(version *semver.Version, hc *dockercontainer.HostConfig, podSandboxID string) {
+	if version.LT(semver.Version{Major: 1, Minor: 26}) && strings.HasPrefix(string(hc.PidMode), "container:") {
+		hc.PidMode = ""
 	}
 }

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -40,7 +40,7 @@ function cleanup {
 trap cleanup EXIT
 
 echo "Building client-gen"
-CLIENTGEN="${PWD}/client-gen-binary"
+CLIENTGEN="${PWD}/client-gen"
 
 go build -o "${CLIENTGEN}" ${CODEGEN_PKG}/cmd/client-gen
 

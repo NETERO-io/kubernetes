@@ -35,7 +35,6 @@ import (
 	kstrings "k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // ProbeVolumePlugins is the primary entrypoint for volume plugins.
@@ -137,7 +136,7 @@ func (plugin *storageosPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod
 			MetricsProvider: volume.NewMetricsStatFS(getPath(pod.UID, volNamespace, volName, spec.Name(), plugin.host)),
 		},
 		diskMounter:  &mount.SafeFormatAndMount{Interface: mounter, Exec: exec},
-		mountOptions: volume.MountOptionFromSpec(spec),
+		mountOptions: util.MountOptionFromSpec(spec),
 	}, nil
 }
 
@@ -389,7 +388,7 @@ func (b *storageosMounter) SetUpAt(dir string, fsGroup *int64) error {
 	if b.readOnly {
 		options = append(options, "ro")
 	}
-	mountOptions := volume.JoinMountOptions(b.mountOptions, options)
+	mountOptions := util.JoinMountOptions(b.mountOptions, options)
 
 	globalPDPath := makeGlobalPDName(b.plugin.host, b.pvName, b.volNamespace, b.volName)
 	glog.V(4).Infof("Attempting to bind mount to pod volume at %s", dir)
@@ -561,9 +560,12 @@ type storageosProvisioner struct {
 
 var _ volume.Provisioner = &storageosProvisioner{}
 
-func (c *storageosProvisioner) Provision() (*v1.PersistentVolume, error) {
-	if !volume.AccessModesContainedInAll(c.plugin.GetAccessModes(), c.options.PVC.Spec.AccessModes) {
+func (c *storageosProvisioner) Provision(selectedNode *v1.Node, allowedTopologies []v1.TopologySelectorTerm) (*v1.PersistentVolume, error) {
+	if !util.AccessModesContainedInAll(c.plugin.GetAccessModes(), c.options.PVC.Spec.AccessModes) {
 		return nil, fmt.Errorf("invalid AccessModes %v: only AccessModes %v are supported", c.options.PVC.Spec.AccessModes, c.plugin.GetAccessModes())
+	}
+	if util.CheckPersistentVolumeClaimModeBlock(c.options.PVC) {
+		return nil, fmt.Errorf("%s does not support block volume provisioning", c.plugin.GetPluginName())
 	}
 
 	var adminSecretName, adminSecretNamespace string
@@ -600,7 +602,11 @@ func (c *storageosProvisioner) Provision() (*v1.PersistentVolume, error) {
 		c.labels[k] = v
 	}
 	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-	c.sizeGB = int(volume.RoundUpSize(capacity.Value(), 1024*1024*1024))
+	var err error
+	c.sizeGB, err = util.RoundUpToGiBInt(capacity)
+	if err != nil {
+		return nil, err
+	}
 
 	apiCfg, err := parsePVSecret(adminSecretNamespace, adminSecretName, c.plugin.host.GetKubeClient())
 	if err != nil {
@@ -622,7 +628,7 @@ func (c *storageosProvisioner) Provision() (*v1.PersistentVolume, error) {
 			Name:   vol.Name,
 			Labels: map[string]string{},
 			Annotations: map[string]string{
-				volumehelper.VolumeDynamicallyCreatedByKey: "storageos-dynamic-provisioner",
+				util.VolumeDynamicallyCreatedByKey: "storageos-dynamic-provisioner",
 			},
 		},
 		Spec: v1.PersistentVolumeSpec{

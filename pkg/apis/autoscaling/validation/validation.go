@@ -19,6 +19,7 @@ package validation
 import (
 	"strings"
 
+	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	pathvalidation "k8s.io/apimachinery/pkg/api/validation/path"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -28,7 +29,7 @@ import (
 
 func ValidateScale(scale *autoscaling.Scale) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, apivalidation.ValidateObjectMeta(&scale.ObjectMeta, true, apivalidation.NameIsDNSSubdomain, field.NewPath("metadata"))...)
+	allErrs = append(allErrs, apivalidation.ValidateObjectMeta(&scale.ObjectMeta, true, apimachineryvalidation.NameIsDNSSubdomain, field.NewPath("metadata"))...)
 
 	if scale.Spec.Replicas < 0 {
 		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "replicas"), scale.Spec.Replicas, "must be greater than or equal to 0"))
@@ -195,6 +196,10 @@ func validateExternalSource(src *autoscaling.ExternalMetricSource, fldPath *fiel
 
 	if len(src.MetricName) == 0 {
 		allErrs = append(allErrs, field.Required(fldPath.Child("metricName"), "must specify a metric name"))
+	} else {
+		for _, msg := range pathvalidation.IsValidPathSegmentName(src.MetricName) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("metricName"), src.MetricName, msg))
+		}
 	}
 
 	if src.TargetValue == nil && src.TargetAverageValue == nil {

@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/kubernetes/pkg/proxy/apis/kubeproxyconfig"
-	utilpointer "k8s.io/kubernetes/pkg/util/pointer"
+	utilpointer "k8s.io/utils/pointer"
 )
 
 // Funcs returns the fuzzer functions for the kube-proxy apis.
@@ -44,7 +44,9 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			obj.IPTables.MasqueradeBit = utilpointer.Int32Ptr(c.Int31())
 			obj.MetricsBindAddress = fmt.Sprintf("%d.%d.%d.%d:%d", c.Intn(256), c.Intn(256), c.Intn(256), c.Intn(256), c.Intn(65536))
 			obj.OOMScoreAdj = utilpointer.Int32Ptr(c.Int31())
-			obj.ResourceContainer = c.RandString()
+			obj.ResourceContainer = "foo"
+			obj.ClientConnection.ContentType = "bar"
+			obj.NodePortAddresses = []string{"1.2.3.0/24"}
 		},
 	}
 }

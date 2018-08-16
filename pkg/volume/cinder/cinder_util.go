@@ -32,6 +32,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/volume"
+	volutil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/utils/exec"
 )
 
@@ -168,10 +169,13 @@ func (util *DiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID string,
 	}
 
 	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-	volSizeBytes := capacity.Value()
 	// Cinder works with gigabytes, convert to GiB with rounding up
-	volSizeGB := int(volume.RoundUpSize(volSizeBytes, 1024*1024*1024))
-	name := volume.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 255) // Cinder volume name can have up to 255 characters
+	volSizeGiB, err := volutil.RoundUpToGiBInt(capacity)
+	if err != nil {
+		return "", 0, nil, "", err
+	}
+
+	name := volutil.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 255) // Cinder volume name can have up to 255 characters
 	vtype := ""
 	availability := ""
 	// Apply ProvisionerParameters (case-insensitive). We leave validation of
@@ -203,14 +207,14 @@ func (util *DiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID string,
 		// if we did not get any zones, lets leave it blank and gophercloud will
 		// use zone "nova" as default
 		if len(zones) > 0 {
-			availability = volume.ChooseZoneForVolume(zones, c.options.PVC.Name)
+			availability = volutil.ChooseZoneForVolume(zones, c.options.PVC.Name)
 		}
 	}
 
-	volumeID, volumeAZ, IgnoreVolumeAZ, errr := cloud.CreateVolume(name, volSizeGB, vtype, availability, c.options.CloudTags)
-	if errr != nil {
-		glog.V(2).Infof("Error creating cinder volume: %v", errr)
-		return "", 0, nil, "", errr
+	volumeID, volumeAZ, volumeRegion, IgnoreVolumeAZ, err := cloud.CreateVolume(name, volSizeGiB, vtype, availability, c.options.CloudTags)
+	if err != nil {
+		glog.V(2).Infof("Error creating cinder volume: %v", err)
+		return "", 0, nil, "", err
 	}
 	glog.V(2).Infof("Successfully created cinder volume %s", volumeID)
 
@@ -218,8 +222,9 @@ func (util *DiskUtil) CreateVolume(c *cinderVolumeProvisioner) (volumeID string,
 	volumeLabels = make(map[string]string)
 	if IgnoreVolumeAZ == false {
 		volumeLabels[kubeletapis.LabelZoneFailureDomain] = volumeAZ
+		volumeLabels[kubeletapis.LabelZoneRegion] = volumeRegion
 	}
-	return volumeID, volSizeGB, volumeLabels, fstype, nil
+	return volumeID, volSizeGiB, volumeLabels, fstype, nil
 }
 
 func probeAttachedVolume() error {
